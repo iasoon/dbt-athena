@@ -9,16 +9,19 @@
 
   {{ run_hooks(pre_hooks) }}
 
-  {%- if old_relation is not none -%}
-      {{ adapter.drop_relation(old_relation) }}
+  {%- if old_relation is none -%}
+    {% call statement('main') -%}
+      {{ create_table_as(False, target_relation, sql) }}
+    {% endcall -%}
+  {%- else -%}
+    {%- set temp_relation = adapter.create_temp_table(database=database, schema=schema) -%}
+    {% call statement('main') -%}
+      {{ create_table_as(False, temp_relation, sql) }}
+    {% endcall -%}
+    {% do adapter.replace_table(target_relation, temp_relation) %}
   {%- endif -%}
 
-  -- build model
-  {% call statement('main') -%}
-    {{ create_table_as(False, target_relation, sql) }}
-  {% endcall -%}
 
-  -- set table properties
   {{ set_table_classification(target_relation, 'parquet') }}
 
   {{ run_hooks(post_hooks) }}

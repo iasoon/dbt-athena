@@ -109,3 +109,71 @@ class AthenaAdapter(SQLAdapter):
         self, column: str, quote_config: Optional[bool]
     ) -> str:
         return super().quote_seed_column(column, False)
+    
+    @available
+    def create_temp_table(self, database: Optional[str] = None, schema: Optional[str] = None) -> str:
+        # todo: defaults
+        identifier = str(uuid4()).replace("-", "_") # athena table names cannot contain hyphens
+        print(identifier)
+        return AthenaRelation.create(database=database, schema=schema, identifier=identifier, type="table")
+
+
+    @available
+    def replace_table(self, target_relation, source_relation):
+        conn = self.connections.get_thread_connection()
+        client = conn.handle
+
+        with boto3_client_lock:
+            glue_client = boto3.client('glue', region_name=client.region_name)
+
+            # fetch current state of target and soruce relation
+            source_glue_table = glue_client.get_table(
+                DatabaseName=source_relation.schema,
+                Name=source_relation.identifier,
+            )["Table"]
+
+            original_target_table = glue_client.get_table(
+                DatabaseName=target_relation.schema,
+                Name=target_relation.identifier,
+            )["Table"]
+
+
+            # overwrite the target glue table with the target table metadata
+            attributes_to_copy = {
+                "Description",
+                "Owner",
+                "Retention",
+                "StorageDescriptor",
+                "PartitionKeys",
+                "TableType",
+                "Parameters",
+            }
+
+            table_input = {k: v for k, v in source_glue_table.items() if k in attributes_to_copy}
+            table_input["Name"] = target_relation.identifier
+
+            glue_client.update_table(
+                DatabaseName=target_relation.schema,
+                TableInput=table_input,
+            )
+
+            # delete the target table from the glue catalog
+            glue_client.delete_table(
+                DatabaseName=source_relation.schema,
+                Name=source_relation.table,
+            )
+
+            # delete the data files that the original target table metadata pointed to
+            # TODO: what happens when we delete the data while a query is running?
+            # maybe it would be better to keep it here, and have a "garbage collector" delete
+            # unused data folders after a while
+            p = re.compile('s3://([^/]*)/(.*)')
+            m = p.match(original_target_table["StorageDescriptor"]["Location"])
+            if m is not None:
+                bucket_name = m.group(1)
+                prefix = m.group(2)
+                s3_resource = boto3.resource('s3', region_name=client.region_name)
+                s3_bucket = s3_resource.Bucket(bucket_name)
+                s3_bucket.objects.filter(Prefix=prefix).delete()
+
+            print(f"deleted {source_relation.schema}.{source_relation.table}")
